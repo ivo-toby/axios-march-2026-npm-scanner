@@ -26,6 +26,12 @@ PAYLOAD_SIGNATURES = [
     "com.apple.act.mond",
     "sfrclak.com",
 ]
+# Known-bad integrity hash prefixes from compromised tarballs.
+# Partial SRI hashes (first 52 chars) to match against lockfile integrity fields.
+# Extend this set as security researchers confirm additional hashes.
+KNOWN_BAD_INTEGRITY_PREFIXES: set[str] = set()
+# Suspicious package names to look for in the npm cache.
+NPM_CACHE_SUSPECT_PACKAGES = {"axios/-/axios-1.14.1.tgz", "axios/-/axios-0.30.4.tgz", "plain-crypto-js"}
 SENTINEL_FILES = {
     "package.json",
     "package-lock.json",
@@ -81,6 +87,7 @@ def scan_project(root: Path) -> list[Finding]:
             findings.extend(_scan_text_lockfile(text_lockfile))
     findings.extend(_scan_installed_packages(root))
     findings.extend(_scan_payload_files(root))
+    findings.extend(_scan_post_execution_artifacts(root))
     return findings
 
 
@@ -141,13 +148,20 @@ def _scan_lockfile(path: Path) -> list[Finding]:
     findings: list[Finding] = []
 
     for package_path, package_data in data.get("packages", {}).items():
-        if package_path.endswith("/axios") or package_path == "node_modules/axios":
+        integrity = package_data.get("integrity", "")
+        is_axios = package_path.endswith("/axios") or package_path == "node_modules/axios"
+        is_suspicious = package_path.endswith(f"/{SUSPICIOUS_PACKAGE}") or package_path == f"node_modules/{SUSPICIOUS_PACKAGE}"
+        if is_axios:
             version = package_data.get("version")
             dependencies = package_data.get("dependencies", {})
             if version in COMPROMISED_AXIOS_VERSIONS or SUSPICIOUS_PACKAGE in dependencies:
                 findings.append(Finding(path=path, package="axios", reason="compromised package-lock entry"))
-        if package_path.endswith(f"/{SUSPICIOUS_PACKAGE}") or package_path == f"node_modules/{SUSPICIOUS_PACKAGE}":
+            elif _integrity_is_known_bad(integrity):
+                findings.append(Finding(path=path, package="axios", reason="known-bad integrity hash"))
+        elif is_suspicious:
             findings.append(Finding(path=path, package=SUSPICIOUS_PACKAGE, reason="suspicious package present"))
+        elif _integrity_is_known_bad(integrity):
+            findings.append(Finding(path=path, package=package_path, reason="known-bad integrity hash"))
 
     findings.extend(_scan_legacy_dependencies(path, data.get("dependencies", {})))
     return findings
@@ -233,7 +247,72 @@ def scan_system_iocs() -> list[Finding]:
     for ioc_path in SYSTEM_IOC_PATHS.get(current_os, []):
         if ioc_path.exists():
             findings.append(Finding(path=ioc_path, package="axios-rat", reason=f"RAT artifact found ({current_os})"))
+    findings.extend(_scan_npm_cache())
     return findings
+
+
+def _scan_npm_cache() -> list[Finding]:
+    findings: list[Finding] = []
+    npm_cache = Path.home() / ".npm" / "_cacache"
+    if not npm_cache.is_dir():
+        return findings
+    content_index = npm_cache / "content-v2"
+    if not content_index.is_dir():
+        return findings
+    # Scan the index entries for references to suspect packages.
+    index_dir = npm_cache / "index-v5"
+    if not index_dir.is_dir():
+        return findings
+    for index_file in index_dir.rglob("*"):
+        if not index_file.is_file():
+            continue
+        try:
+            contents = index_file.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        for suspect in NPM_CACHE_SUSPECT_PACKAGES:
+            if suspect in contents:
+                findings.append(Finding(
+                    path=index_file,
+                    package="axios-rat",
+                    reason=f"npm cache contains reference to {suspect}",
+                ))
+                break
+    return findings
+
+
+def _scan_post_execution_artifacts(root: Path) -> list[Finding]:
+    findings: list[Finding] = []
+    node_modules = root / "node_modules"
+    if not node_modules.is_dir():
+        return findings
+    # The malware overwrites axios/package.json from a file called package.md
+    # during self-destruct. The presence of package.md in an axios directory is
+    # an indicator that the malware executed and cleaned up after itself.
+    for axios_dir in _find_installed_packages(node_modules, "axios"):
+        package_md = axios_dir / "package.md"
+        if package_md.exists():
+            findings.append(Finding(
+                path=package_md,
+                package="axios-rat",
+                reason="post-execution artifact: package.md (malware self-destruct remnant)",
+            ))
+    # Also check for package.md in plain-crypto-js directories.
+    for pkg_dir in _find_installed_packages(node_modules, SUSPICIOUS_PACKAGE):
+        package_md = pkg_dir / "package.md"
+        if package_md.exists():
+            findings.append(Finding(
+                path=package_md,
+                package="axios-rat",
+                reason="post-execution artifact: package.md (malware self-destruct remnant)",
+            ))
+    return findings
+
+
+def _integrity_is_known_bad(integrity: str) -> bool:
+    if not integrity or not KNOWN_BAD_INTEGRITY_PREFIXES:
+        return False
+    return any(integrity.startswith(prefix) for prefix in KNOWN_BAD_INTEGRITY_PREFIXES)
 
 
 def _scan_payload_files(root: Path) -> list[Finding]:

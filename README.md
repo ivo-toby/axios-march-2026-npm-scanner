@@ -8,8 +8,11 @@
 - Scans `package-lock.json`, `npm-shrinkwrap.json`, and `node_modules/.package-lock.json`.
 - Scans installed `node_modules/axios` and `node_modules/plain-crypto-js`, including nested installs.
 - Flags `yarn.lock` and `pnpm-lock.yaml` entries, but leaves those lockfiles unchanged.
-- Scans JS files inside `node_modules/axios` and `node_modules/plain-crypto-js` for malicious payload indicators (`execSync`, `writeFileSync`, C2 domains).
+- Scans JS files inside compromised `node_modules/axios` and `node_modules/plain-crypto-js` for malicious payload indicators (`execSync`, `writeFileSync`, C2 domains).
+- Checks lockfile integrity hashes against known-bad values (extensible via `KNOWN_BAD_INTEGRITY_PREFIXES`).
+- Detects `package.md` files in axios directories -- a self-destruct remnant left by the malware after it cleans up its own traces.
 - Optionally checks the local filesystem for RAT artifacts dropped by the malware.
+- Scans the npm cache (`~/.npm/_cacache`) for cached copies of compromised tarballs.
 
 ## Usage
 
@@ -67,7 +70,10 @@ python3 axios_scanner.py --fix /path/to/repo
 | Windows | `%PROGRAMDATA%\wt.exe`                  |
 | Linux   | `/tmp/ld.py`                            |
 
-The malware self-destructs its npm traces after execution, so a clean `node_modules` does not guarantee the system wasn't compromised. Use `--check-system` to verify.
+The malware self-destructs its npm traces after execution, so a clean `node_modules` does not guarantee the system wasn't compromised. Use `--check-system` to verify. This also scans the npm cache (`~/.npm/_cacache`) for references to the compromised tarballs.
+
+The scanner also detects `package.md` files inside axios directories in `node_modules`. The malware creates this file during its self-destruct sequence (it overwrites the real `package.json` from `package.md`). If you see this finding, the malware executed on that machine -- treat it as compromised even if everything else looks clean.
+
 If you combine `--fix --check-system`, the command still exits with findings until those host-level artifacts are removed.
 
 ## Limits
@@ -75,6 +81,8 @@ If you combine `--fix --check-system`, the command still exits with findings unt
 - `yarn.lock` and `pnpm-lock.yaml` are detection-only; regenerate them with the native package manager after review. The text lockfile parser is heuristic-based (indent and header detection), so unusual formatting may be missed. When in doubt, regenerate the lockfile.
 - Lockfile repair fetches safe Axios metadata from the npm registry.
 - Version spec rewriting handles `^`, `~`, `=`, and exact pins. Range specs like `>=1.14.1` are not rewritten.
+- `KNOWN_BAD_INTEGRITY_PREFIXES` ships empty. Add confirmed SRI hash prefixes from security advisories to enable integrity-based detection. This is a defense-in-depth layer for catching tampered packages where the version field has been altered.
+- If the malware already executed and fully cleaned up (removed `package.md`, cleared cache), detection relies on the RAT artifact paths under `--check-system`. There is no guaranteed detection after a complete cleanup.
 
 ## Source Material
 

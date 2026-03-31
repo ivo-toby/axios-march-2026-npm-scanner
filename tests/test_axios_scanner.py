@@ -6,7 +6,16 @@ from io import StringIO
 from pathlib import Path
 from unittest import mock
 
-from axios_scanner import Finding, fix_project, main, scan_paths, scan_project
+from axios_scanner import (
+    Finding,
+    _integrity_is_known_bad,
+    _scan_npm_cache,
+    _scan_post_execution_artifacts,
+    fix_project,
+    main,
+    scan_paths,
+    scan_project,
+)
 
 
 class StubRegistryClient:
@@ -350,6 +359,117 @@ class AxiosScannerTests(unittest.TestCase):
             findings = scan_project(root)
 
             self.assertEqual([], findings)
+
+    def test_scan_project_detects_package_md_self_destruct_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            axios_dir = root / "node_modules" / "axios"
+            axios_dir.mkdir(parents=True)
+            (axios_dir / "package.json").write_text(
+                json.dumps({"name": "axios", "version": "1.14.0"}),
+                encoding="utf-8",
+            )
+            # The malware creates package.md during self-destruct
+            (axios_dir / "package.md").write_text(
+                '{"name": "axios", "version": "1.14.1"}',
+                encoding="utf-8",
+            )
+
+            findings = scan_project(root)
+
+            self.assertEqual(1, len(findings))
+            self.assertEqual("axios-rat", findings[0].package)
+            self.assertIn("package.md", findings[0].reason)
+
+    def test_scan_project_no_false_positive_without_package_md(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            axios_dir = root / "node_modules" / "axios"
+            axios_dir.mkdir(parents=True)
+            (axios_dir / "package.json").write_text(
+                json.dumps({"name": "axios", "version": "1.14.0"}),
+                encoding="utf-8",
+            )
+
+            findings = _scan_post_execution_artifacts(root)
+
+            self.assertEqual([], findings)
+
+    def test_npm_cache_scan_finds_suspect_entries(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_root = Path(tmp)
+            index_dir = cache_root / ".npm" / "_cacache" / "index-v5" / "ab" / "cd"
+            index_dir.mkdir(parents=True)
+            (cache_root / ".npm" / "_cacache" / "content-v2").mkdir(parents=True)
+            (index_dir / "entry1").write_text(
+                'https://registry.npmjs.org/axios/-/axios-1.14.1.tgz\nsha512-abc',
+                encoding="utf-8",
+            )
+
+            with mock.patch("axios_scanner.Path.home", return_value=cache_root):
+                findings = _scan_npm_cache()
+
+            self.assertEqual(1, len(findings))
+            self.assertIn("npm cache", findings[0].reason)
+
+    def test_npm_cache_scan_ignores_clean_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_root = Path(tmp)
+            index_dir = cache_root / ".npm" / "_cacache" / "index-v5" / "ab" / "cd"
+            index_dir.mkdir(parents=True)
+            (cache_root / ".npm" / "_cacache" / "content-v2").mkdir(parents=True)
+            (index_dir / "entry1").write_text(
+                'https://registry.npmjs.org/axios/-/axios-1.14.0.tgz\nsha512-safe',
+                encoding="utf-8",
+            )
+
+            with mock.patch("axios_scanner.Path.home", return_value=cache_root):
+                findings = _scan_npm_cache()
+
+            self.assertEqual([], findings)
+
+    def test_integrity_check_with_known_bad_prefix(self) -> None:
+        import axios_scanner
+        original = axios_scanner.KNOWN_BAD_INTEGRITY_PREFIXES.copy()
+        try:
+            axios_scanner.KNOWN_BAD_INTEGRITY_PREFIXES.add("sha512-EVIL")
+            self.assertTrue(_integrity_is_known_bad("sha512-EVILabcdef"))
+            self.assertFalse(_integrity_is_known_bad("sha512-SAFEabcdef"))
+            self.assertFalse(_integrity_is_known_bad(""))
+        finally:
+            axios_scanner.KNOWN_BAD_INTEGRITY_PREFIXES = original
+
+    def test_lockfile_integrity_hash_detection(self) -> None:
+        import axios_scanner
+        original = axios_scanner.KNOWN_BAD_INTEGRITY_PREFIXES.copy()
+        try:
+            axios_scanner.KNOWN_BAD_INTEGRITY_PREFIXES.add("sha512-EVIL")
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                lockfile = root / "package-lock.json"
+                lockfile.write_text(
+                    json.dumps({
+                        "name": "demo",
+                        "lockfileVersion": 3,
+                        "packages": {
+                            "": {"dependencies": {"axios": "^1.14.0"}},
+                            "node_modules/axios": {
+                                "version": "1.14.0",
+                                "integrity": "sha512-EVILabcdefghijklmnop",
+                                "dependencies": {},
+                            },
+                        },
+                    }),
+                    encoding="utf-8",
+                )
+
+                findings = scan_project(root)
+
+                integrity_findings = [f for f in findings if "integrity" in f.reason]
+                self.assertEqual(1, len(integrity_findings))
+                self.assertIn("known-bad", integrity_findings[0].reason)
+        finally:
+            axios_scanner.KNOWN_BAD_INTEGRITY_PREFIXES = original
 
 
 if __name__ == "__main__":
