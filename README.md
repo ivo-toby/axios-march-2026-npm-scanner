@@ -39,6 +39,8 @@ Apply npm-focused remediation:
 python3 axios_scanner.py --fix /path/to/repo
 ```
 
+**Warning:** `--fix` is destructive -- it rewrites lockfiles in place and deletes directories from `node_modules`. Always run without `--fix` first to review findings, and make sure your work is committed before running remediation.
+
 ## Exit codes
 
 | Code | Meaning |
@@ -70,7 +72,7 @@ If you combine `--fix --check-system`, the command still exits with findings unt
 
 ## Limits
 
-- `yarn.lock` and `pnpm-lock.yaml` are detection-only; regenerate them with the native package manager after review.
+- `yarn.lock` and `pnpm-lock.yaml` are detection-only; regenerate them with the native package manager after review. The text lockfile parser is heuristic-based (indent and header detection), so unusual formatting may be missed. When in doubt, regenerate the lockfile.
 - Lockfile repair fetches safe Axios metadata from the npm registry.
 - Version spec rewriting handles `^`, `~`, `=`, and exact pins. Range specs like `>=1.14.1` are not rewritten.
 
