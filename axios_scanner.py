@@ -193,10 +193,22 @@ def _scan_installed_packages(root: Path) -> list[Finding]:
 def _scan_text_lockfile(path: Path) -> list[Finding]:
     contents = path.read_text(encoding="utf-8")
     findings: list[Finding] = []
-    if any(re.search(rf'(?<![.\d]){re.escape(version)}(?![.\d])', contents)
-           for version in COMPROMISED_AXIOS_VERSIONS):
+    found_axios = False
+    found_plain_crypto = False
+
+    for header, body in _iter_text_lockfile_blocks(contents):
+        header_mentions_axios = _header_mentions_package(header, "axios")
+        header_mentions_plain_crypto = _header_mentions_package(header, SUSPICIOUS_PACKAGE)
+        if header_mentions_axios and any(version in header or _block_mentions_version(body, version) for version in COMPROMISED_AXIOS_VERSIONS):
+            found_axios = True
+        if header_mentions_axios and _block_mentions_package_dependency(body, SUSPICIOUS_PACKAGE):
+            found_plain_crypto = True
+        if header_mentions_plain_crypto and any(version in header or _block_mentions_version(body, version) for version in SUSPICIOUS_PACKAGE_VERSIONS):
+            found_plain_crypto = True
+
+    if found_axios:
         findings.append(Finding(path=path, package="axios", reason="compromised version reference in text lockfile"))
-    if SUSPICIOUS_PACKAGE in contents:
+    if found_plain_crypto:
         findings.append(Finding(path=path, package=SUSPICIOUS_PACKAGE, reason="suspicious package reference in text lockfile"))
     return findings
 
@@ -230,6 +242,9 @@ def _scan_payload_files(root: Path) -> list[Finding]:
     for target_dir in [node_modules / "axios", node_modules / SUSPICIOUS_PACKAGE]:
         if not target_dir.is_dir():
             continue
+        package_data, error = _load_json_object(target_dir / "package.json")
+        if error or not _is_suspicious_installed_package(package_data):
+            continue
         for js_file in target_dir.rglob("*.js"):
             try:
                 contents = js_file.read_text(encoding="utf-8", errors="ignore")
@@ -243,6 +258,51 @@ def _scan_payload_files(root: Path) -> list[Finding]:
                     reason=f"malicious payload indicators: {', '.join(matched)}",
                 ))
     return findings
+
+
+def _iter_text_lockfile_blocks(contents: str) -> list[tuple[str, str]]:
+    lines = contents.splitlines()
+    blocks: list[tuple[str, str]] = []
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped.endswith(":"):
+            continue
+        indent = len(line) - len(line.lstrip(" "))
+        if indent > 2:
+            continue
+        body_lines: list[str] = []
+        for following in lines[index + 1:]:
+            next_stripped = following.strip()
+            next_indent = len(following) - len(following.lstrip(" "))
+            if next_stripped.endswith(":") and next_indent <= indent:
+                break
+            body_lines.append(following)
+        blocks.append((stripped, "\n".join(body_lines)))
+    return blocks
+
+
+def _header_mentions_package(header: str, package_name: str) -> bool:
+    return re.search(rf'(^|[,"\']){re.escape(package_name)}@', header) is not None
+
+
+def _block_mentions_version(block: str, version: str) -> bool:
+    return re.search(rf'(?<![.\d]){re.escape(version)}(?![.\d])', block) is not None
+
+
+def _block_mentions_package_dependency(block: str, package_name: str) -> bool:
+    return re.search(rf'(^|\n)\s+{re.escape(package_name)}(?:\s|:)', block) is not None
+
+
+def _is_suspicious_installed_package(package_data: dict[str, Any] | None) -> bool:
+    if not package_data:
+        return False
+    name = package_data.get("name")
+    version = package_data.get("version")
+    return (
+        name == "axios" and version in COMPROMISED_AXIOS_VERSIONS
+    ) or (
+        name == SUSPICIOUS_PACKAGE and version in SUSPICIOUS_PACKAGE_VERSIONS
+    )
 
 
 def _find_installed_packages(node_modules: Path, package_name: str) -> list[Path]:

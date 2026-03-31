@@ -319,6 +319,38 @@ class AxiosScannerTests(unittest.TestCase):
             self.assertEqual(1, exit_code)
             self.assertIn("scanner-error", output.getvalue())
 
+    def test_scan_project_ignores_unrelated_text_lockfile_version_mentions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "yarn.lock").write_text(
+                'left-pad@1.3.0:\n'
+                '  version "1.14.1"\n',
+                encoding="utf-8",
+            )
+
+            findings = scan_project(root)
+
+            self.assertEqual([], findings)
+
+    def test_scan_project_ignores_generic_payload_signatures_in_safe_axios(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            axios_dir = root / "node_modules" / "axios"
+            axios_dir.mkdir(parents=True)
+            (axios_dir / "package.json").write_text(
+                json.dumps({"name": "axios", "version": "0.27.2"}),
+                encoding="utf-8",
+            )
+            (axios_dir / "helper.js").write_text(
+                'const { execSync } = require("child_process");\n'
+                'fs.writeFileSync("x", "y");\n',
+                encoding="utf-8",
+            )
+
+            findings = scan_project(root)
+
+            self.assertEqual([], findings)
+
 
 if __name__ == "__main__":
     unittest.main()
