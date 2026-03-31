@@ -4,8 +4,9 @@ import unittest
 from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
+from unittest import mock
 
-from axios_scanner import fix_project, main, scan_paths, scan_project
+from axios_scanner import Finding, fix_project, main, scan_paths, scan_project
 
 
 class StubRegistryClient:
@@ -225,6 +226,69 @@ class AxiosScannerTests(unittest.TestCase):
             self.assertEqual("1.14.0", axios_entry["version"])
             self.assertNotIn("plain-crypto-js", axios_entry["requires"])
             self.assertNotIn("plain-crypto-js", rewritten["dependencies"])
+
+    def test_main_checks_system_iocs_without_project_roots(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            output = StringIO()
+
+            with mock.patch(
+                "axios_scanner.scan_system_iocs",
+                return_value=[Finding(path=Path("/tmp/ioc"), package="axios-rat", reason="ioc")],
+            ):
+                with redirect_stdout(output):
+                    exit_code = main(["--check-system", str(root)])
+
+            self.assertEqual(1, exit_code)
+            self.assertIn("/tmp/ioc", output.getvalue())
+
+    def test_main_json_output_without_project_roots(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            output = StringIO()
+
+            with redirect_stdout(output):
+                exit_code = main(["--json", str(root)])
+
+            self.assertEqual(0, exit_code)
+            payload = json.loads(output.getvalue())
+            self.assertEqual("clean", payload["status"])
+            self.assertEqual([], payload["findings"])
+
+    def test_scan_project_finds_compromised_axios_in_scoped_nested_node_modules(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            scoped_axios = root / "node_modules" / "@vendor" / "pkg" / "node_modules" / "axios"
+            scoped_axios.mkdir(parents=True)
+            (scoped_axios / "package.json").write_text(
+                json.dumps({"name": "axios", "version": "1.14.1"}),
+                encoding="utf-8",
+            )
+
+            findings = scan_project(root)
+
+            self.assertEqual(1, len(findings))
+            self.assertEqual("axios", findings[0].package)
+
+    def test_main_fix_check_system_keeps_reporting_remaining_system_iocs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "package.json").write_text(
+                json.dumps({"dependencies": {"axios": "^1.14.1"}}),
+                encoding="utf-8",
+            )
+            output = StringIO()
+
+            with mock.patch(
+                "axios_scanner.scan_system_iocs",
+                return_value=[Finding(path=Path("/tmp/ioc"), package="axios-rat", reason="ioc")],
+            ):
+                with redirect_stdout(output):
+                    exit_code = main(["--fix", "--check-system", str(root)])
+
+            self.assertEqual(1, exit_code)
+            self.assertIn("Remaining findings", output.getvalue())
+            self.assertNotIn("Remediation complete.", output.getvalue())
 
 
 if __name__ == "__main__":

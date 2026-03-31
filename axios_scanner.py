@@ -239,13 +239,25 @@ def _find_installed_packages(node_modules: Path, package_name: str) -> list[Path
         results.append(candidate)
     if not node_modules.is_dir():
         return results
-    for entry in node_modules.iterdir():
-        if not entry.is_dir() or entry.name in {".", "..", ".cache", ".package-lock.json"}:
-            continue
-        nested = entry / "node_modules"
+    for package_dir in _iter_package_dirs(node_modules):
+        nested = package_dir / "node_modules"
         if nested.is_dir():
             results.extend(_find_installed_packages(nested, package_name))
     return results
+
+
+def _iter_package_dirs(node_modules: Path) -> list[Path]:
+    package_dirs: list[Path] = []
+    for entry in node_modules.iterdir():
+        if not entry.is_dir() or entry.name in {".", "..", ".cache", ".package-lock.json"}:
+            continue
+        if entry.name.startswith("@"):
+            for scoped_entry in entry.iterdir():
+                if scoped_entry.is_dir():
+                    package_dirs.append(scoped_entry)
+            continue
+        package_dirs.append(entry)
+    return package_dirs
 
 
 def _fix_lockfile(path: Path, registry_client: Any) -> bool:
@@ -373,10 +385,6 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     project_roots = discover_project_roots(args.paths)
-    if not project_roots:
-        print("No JavaScript package roots found.")
-        return 0
-
     findings: list[Finding] = []
     for root in project_roots:
         findings.extend(scan_project(root))
@@ -411,6 +419,9 @@ def main(argv: list[str] | None = None) -> int:
         fix_project(root, registry_client)
 
     remaining = scan_paths([str(path) for path in project_roots])
+    if args.check_system:
+        remaining.extend(scan_system_iocs())
+    remaining.sort(key=lambda f: (str(f.path), f.package, f.reason))
     if remaining:
         print("\nRemaining findings require manual package-manager remediation:")
         for finding in remaining:

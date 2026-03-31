@@ -31,6 +31,8 @@ Check for RAT artifacts on the local system:
 python3 axios_scanner.py --check-system /path/to/repo
 ```
 
+This mode also works when the target directory has no JavaScript project files. Any accessible directory path is fine.
+
 Apply npm-focused remediation:
 
 ```bash
@@ -42,7 +44,7 @@ python3 axios_scanner.py --fix /path/to/repo
 | Code | Meaning |
 |------|---------|
 | 0    | No compromise indicators found |
-| 1    | Findings detected (or remaining after `--fix`) |
+| 1    | Findings detected, including host-level IOCs that remain after `--fix --check-system` |
 
 ## Remediation behavior
 
@@ -64,6 +66,7 @@ python3 axios_scanner.py --fix /path/to/repo
 | Linux   | `/tmp/ld.py`                            |
 
 The malware self-destructs its npm traces after execution, so a clean `node_modules` does not guarantee the system wasn't compromised. Use `--check-system` to verify.
+If you combine `--fix --check-system`, the command still exits with findings until those host-level artifacts are removed.
 
 ## Limits
 
