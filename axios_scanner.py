@@ -135,7 +135,9 @@ def discover_project_roots(paths: list[str | Path]) -> list[Path]:
 
 
 def _scan_lockfile(path: Path) -> list[Finding]:
-    data = json.loads(path.read_text(encoding="utf-8"))
+    data, error = _load_json_object(path)
+    if error:
+        return [error]
     findings: list[Finding] = []
 
     for package_path, package_data in data.get("packages", {}).items():
@@ -152,7 +154,9 @@ def _scan_lockfile(path: Path) -> list[Finding]:
 
 
 def _scan_package_json(path: Path) -> list[Finding]:
-    data = json.loads(path.read_text(encoding="utf-8"))
+    data, error = _load_json_object(path)
+    if error:
+        return [error]
     findings: list[Finding] = []
     for section in ("dependencies", "devDependencies", "optionalDependencies", "peerDependencies"):
         values = data.get(section, {})
@@ -169,11 +173,20 @@ def _scan_installed_packages(root: Path) -> list[Finding]:
     node_modules = root / "node_modules"
     for package_dir in _find_installed_packages(node_modules, "axios"):
         package_json = package_dir / "package.json"
-        package_data = json.loads(package_json.read_text(encoding="utf-8"))
+        package_data, error = _load_json_object(package_json)
+        if error:
+            findings.append(error)
+            continue
         if package_data.get("version") in COMPROMISED_AXIOS_VERSIONS:
             findings.append(Finding(path=package_json, package="axios", reason="installed compromised axios"))
     for package_dir in _find_installed_packages(node_modules, SUSPICIOUS_PACKAGE):
-        findings.append(Finding(path=package_dir / "package.json", package=SUSPICIOUS_PACKAGE, reason="installed suspicious package"))
+        package_json = package_dir / "package.json"
+        if package_json.exists():
+            _, error = _load_json_object(package_json)
+            if error:
+                findings.append(error)
+                continue
+        findings.append(Finding(path=package_json, package=SUSPICIOUS_PACKAGE, reason="installed suspicious package"))
     return findings
 
 
@@ -261,7 +274,9 @@ def _iter_package_dirs(node_modules: Path) -> list[Path]:
 
 
 def _fix_lockfile(path: Path, registry_client: Any) -> bool:
-    data = json.loads(path.read_text(encoding="utf-8"))
+    data, error = _load_json_object(path)
+    if error:
+        return False
     packages = data.get("packages", {})
     modified = False
 
@@ -309,7 +324,9 @@ def _fix_lockfile(path: Path, registry_client: Any) -> bool:
 
 
 def _fix_package_json(path: Path) -> bool:
-    data = json.loads(path.read_text(encoding="utf-8"))
+    data, error = _load_json_object(path)
+    if error:
+        return False
     modified = False
     for section in ("dependencies", "devDependencies", "optionalDependencies", "peerDependencies"):
         values = data.get(section, {})
@@ -342,11 +359,29 @@ def _remove_installed_package_if_needed(package_dir: Path, compromised_versions:
     if compromised_versions is None:
         shutil.rmtree(package_dir)
         return 1
-    package_data = json.loads(package_json.read_text(encoding="utf-8"))
+    package_data, error = _load_json_object(package_json)
+    if error:
+        return 0
     if package_data.get("version") not in compromised_versions:
         return 0
     shutil.rmtree(package_dir)
     return 1
+
+
+def _load_json_object(path: Path) -> tuple[dict[str, Any] | None, Finding | None]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        return None, Finding(
+            path=path,
+            package="scanner-error",
+            reason=f"invalid JSON: {exc.msg} (line {exc.lineno}, column {exc.colno})",
+        )
+    except (OSError, UnicodeDecodeError) as exc:
+        return None, Finding(path=path, package="scanner-error", reason=f"unable to read file: {exc}")
+    if not isinstance(data, dict):
+        return None, Finding(path=path, package="scanner-error", reason="expected top-level JSON object")
+    return data, None
 
 
 def _fix_legacy_dependencies(dependencies: dict[str, Any], registry_client: Any) -> bool:

@@ -290,6 +290,35 @@ class AxiosScannerTests(unittest.TestCase):
             self.assertIn("Remaining findings", output.getvalue())
             self.assertNotIn("Remediation complete.", output.getvalue())
 
+    def test_scan_project_reports_invalid_json_lockfile(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "package-lock.json").write_text(
+                '{\n  "name": "demo",\n<<<<<<< HEAD\n  "lockfileVersion": 3\n=======\n  "lockfileVersion": 2\n>>>>>>> branch\n}\n',
+                encoding="utf-8",
+            )
+
+            findings = scan_project(root)
+
+            self.assertEqual(1, len(findings))
+            self.assertEqual("scanner-error", findings[0].package)
+            self.assertIn("invalid JSON", findings[0].reason)
+
+    def test_main_fix_does_not_crash_on_invalid_json_lockfile(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "package-lock.json").write_text(
+                '{\n  "name": "demo",\n<<<<<<< HEAD\n  "lockfileVersion": 3\n=======\n  "lockfileVersion": 2\n>>>>>>> branch\n}\n',
+                encoding="utf-8",
+            )
+            output = StringIO()
+
+            with redirect_stdout(output):
+                exit_code = main(["--fix", str(root)])
+
+            self.assertEqual(1, exit_code)
+            self.assertIn("scanner-error", output.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()
